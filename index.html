@@ -182,6 +182,7 @@
   .add-item-form {
     display: none; padding: 10px;
     background: var(--surface-alt); border-radius: 3px; margin-top: 8px;
+    position: relative;
   }
   .add-item-form.visible { display: block; }
   .add-item-form select, .add-item-form input {
@@ -192,6 +193,37 @@
   .add-item-form .form-row button { flex: 1; padding: 6px 10px; font-size: 0.85rem; }
   .add-item-form .form-checkbox { display: flex; align-items: center; gap: 6px; font-size: 0.8rem; margin-bottom: 6px; }
   .add-item-form .form-checkbox input { flex: 0; width: auto; margin: 0; }
+  
+  .autocomplete-wrap { position: relative; }
+  .autocomplete-list {
+    position: absolute; top: 100%; left: 0; right: 0; z-index: 100;
+    max-height: 260px; overflow-y: auto;
+    background: var(--surface); border: 1px solid var(--border);
+    border-top: none; border-radius: 0 0 3px 3px;
+    box-shadow: 0 6px 16px rgba(0,0,0,0.1);
+    display: none;
+  }
+  .autocomplete-list.open { display: block; }
+  .autocomplete-item {
+    padding: 7px 10px; cursor: pointer;
+    font-size: 0.83rem; border-bottom: 1px solid var(--border);
+    display: flex; justify-content: space-between; align-items: baseline;
+    gap: 8px;
+  }
+  .autocomplete-item:last-child { border-bottom: none; }
+  .autocomplete-item:hover, .autocomplete-item.active { background: var(--green); }
+  .autocomplete-item-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .autocomplete-item-stats { 
+    flex-shrink: 0; font-size: 0.78rem; text-align: right;
+    white-space: nowrap;
+  }
+  .autocomplete-item-stats .done { color: var(--accent-dark); }
+  .autocomplete-item-stats .remaining { color: #A66553; font-weight: bold; }
+  .autocomplete-item-stats .complete { color: var(--accent); }
+  .autocomplete-empty {
+    padding: 10px; font-size: 0.83rem; color: var(--muted);
+    font-style: italic; text-align: center;
+  }
   
   .add-new-box {
     background: var(--surface-alt); border: 2px dashed var(--border);
@@ -687,7 +719,11 @@ function renderBoxHtml(box, idx) {
   html += '<div class="box-footer"><button class="icon" onclick="toggleAddItem(' + idx + ')">+ добавить товар</button></div>';
   html += '<div class="add-item-form" id="addForm-' + idx + '">';
   html += '<label class="form-checkbox"><input type="checkbox" id="addFormAll-' + idx + '" onchange="renderAddFormOptions(' + idx + ')"> Показать все артикулы справочника</label>';
-  html += '<select id="addFormArt-' + idx + '"></select>';
+  html += '<div class="autocomplete-wrap">';
+  html += '<input type="text" id="addFormSearch-' + idx + '" placeholder="Начни печатать артикул..." autocomplete="off" onfocus="renderAddFormOptions(' + idx + ')" oninput="renderAddFormOptions(' + idx + ')">';
+  html += '<input type="hidden" id="addFormArt-' + idx + '">';
+  html += '<div class="autocomplete-list" id="addFormList-' + idx + '"></div>';
+  html += '</div>';
   html += '<div class="form-row">';
   html += '<input type="number" id="addFormQty-' + idx + '" placeholder="шт" min="1">';
   html += '<button class="primary" onclick="confirmAddItem(' + idx + ')">Добавить</button>';
@@ -696,22 +732,124 @@ function renderBoxHtml(box, idx) {
   return html;
 }
 
+function getPackedCounts() {
+  const counts = {};
+  if (!layout) return counts;
+  layout.boxes.forEach(b => {
+    b.items.forEach(i => {
+      counts[i.article] = (counts[i.article] || 0) + Number(i.qty);
+    });
+  });
+  return counts;
+}
+
 function renderAddFormOptions(boxIdx) {
   const showAll = document.getElementById('addFormAll-' + boxIdx).checked;
-  const select = document.getElementById('addFormArt-' + boxIdx);
-  let opts = '<option value="">Выбери артикул...</option>';
+  const searchInput = document.getElementById('addFormSearch-' + boxIdx);
+  const listDiv = document.getElementById('addFormList-' + boxIdx);
+  const hiddenInput = document.getElementById('addFormArt-' + boxIdx);
+  const query = searchInput.value.trim().toLowerCase();
+  
   let list = [];
   if (showAll) {
     list = dataCache ? dataCache.articles : [];
   } else {
-    // Только артикулы из заявки
     const inRequest = Object.keys(initialRequest || {});
     list = (dataCache ? dataCache.articles : []).filter(a => inRequest.includes(a.article));
   }
+  
+  if (query) {
+    list = list.filter(a => 
+      a.article.toLowerCase().includes(query) || 
+      a.barcode.toLowerCase().includes(query)
+    );
+  }
+  
+  const packed = getPackedCounts();
+  
+  if (list.length === 0) {
+    listDiv.innerHTML = '<div class="autocomplete-empty">Ничего не найдено</div>';
+    listDiv.classList.add('open');
+    return;
+  }
+  
+  let html = '';
   list.forEach(a => {
-    opts += '<option value="' + escapeHtml(a.article) + '">' + escapeHtml(a.article) + ' (' + a.volume.toFixed(2) + ' л/шт)</option>';
+    const needed = (initialRequest && initialRequest[a.article]) || 0;
+    const done = packed[a.article] || 0;
+    const remaining = needed - done;
+    
+    let statsHtml = '';
+    if (needed > 0) {
+      if (remaining <= 0) {
+        statsHtml = '<span class="complete">✓ ' + done + '/' + needed + '</span>';
+      } else {
+        statsHtml = '<span class="done">' + done + '/' + needed + '</span> · <span class="remaining">ост. ' + remaining + '</span>';
+      }
+    } else if (showAll) {
+      statsHtml = '<span style="color:var(--muted)">' + a.volume.toFixed(2) + ' л</span>';
+    }
+    
+    html += '<div class="autocomplete-item" onclick="selectArticle(' + boxIdx + ', \'' + escapeHtml(a.article).replace(/'/g, "\\'") + '\')">';
+    html += '<span class="autocomplete-item-name">' + escapeHtml(a.article) + '</span>';
+    html += '<span class="autocomplete-item-stats">' + statsHtml + '</span>';
+    html += '</div>';
   });
-  select.innerHTML = opts;
+  
+  listDiv.innerHTML = html;
+  listDiv.classList.add('open');
+}
+
+function selectArticle(boxIdx, article) {
+  const searchInput = document.getElementById('addFormSearch-' + boxIdx);
+  const hiddenInput = document.getElementById('addFormArt-' + boxIdx);
+  const listDiv = document.getElementById('addFormList-' + boxIdx);
+  
+  searchInput.value = article;
+  hiddenInput.value = article;
+  listDiv.classList.remove('open');
+  
+  // Автозаполнение количества: если есть остаток — подставить его
+  const packed = getPackedCounts();
+  const needed = (initialRequest && initialRequest[article]) || 0;
+  const done = packed[article] || 0;
+  const remaining = needed - done;
+  const qtyInput = document.getElementById('addFormQty-' + boxIdx);
+  if (remaining > 0 && !qtyInput.value) {
+    qtyInput.value = remaining;
+  }
+  qtyInput.focus();
+}
+
+function toggleAddItem(boxIdx) {
+  document.querySelectorAll('.add-item-form').forEach(f => {
+    if (f.id !== 'addForm-' + boxIdx) f.classList.remove('visible');
+  });
+  const form = document.getElementById('addForm-' + boxIdx);
+  form.classList.toggle('visible');
+  if (form.classList.contains('visible')) {
+    const searchInput = document.getElementById('addFormSearch-' + boxIdx);
+    const hiddenInput = document.getElementById('addFormArt-' + boxIdx);
+    searchInput.value = '';
+    hiddenInput.value = '';
+    renderAddFormOptions(boxIdx);
+    setTimeout(() => searchInput.focus(), 50);
+  }
+}
+
+function confirmAddItem(boxIdx) {
+  const hiddenInput = document.getElementById('addFormArt-' + boxIdx);
+  const searchInput = document.getElementById('addFormSearch-' + boxIdx);
+  const art = hiddenInput.value || searchInput.value.trim();
+  const qty = parseInt(document.getElementById('addFormQty-' + boxIdx).value);
+  if (!art) { alert('Выберите артикул'); return; }
+  if (isNaN(qty) || qty <= 0) { alert('Введите количество'); return; }
+  const artData = findArticle(art);
+  if (!artData) { alert('Артикул не найден в справочнике'); return; }
+  const ex = layout.boxes[boxIdx].items.find(i => i.article === artData.article);
+  if (ex) ex.qty += qty;
+  else layout.boxes[boxIdx].items.push({ article: artData.article, barcode: artData.barcode, qty, volumePerUnit: artData.volume });
+  renderLayout();
 }
 
 function updateQty(boxIdx, itemIdx, newVal) {
@@ -775,28 +913,6 @@ function removeBox(boxIdx) {
 }
 
 function addNewBox() { layout.boxes.push({ items: [] }); renderLayout(); }
-
-function toggleAddItem(boxIdx) {
-  document.querySelectorAll('.add-item-form').forEach(f => {
-    if (f.id !== 'addForm-' + boxIdx) f.classList.remove('visible');
-  });
-  const form = document.getElementById('addForm-' + boxIdx);
-  form.classList.toggle('visible');
-  if (form.classList.contains('visible')) renderAddFormOptions(boxIdx);
-}
-
-function confirmAddItem(boxIdx) {
-  const art = document.getElementById('addFormArt-' + boxIdx).value;
-  const qty = parseInt(document.getElementById('addFormQty-' + boxIdx).value);
-  if (!art) { alert('Выберите артикул'); return; }
-  if (isNaN(qty) || qty <= 0) { alert('Введите количество'); return; }
-  const artData = findArticle(art);
-  if (!artData) { alert('Артикул не найден'); return; }
-  const ex = layout.boxes[boxIdx].items.find(i => i.article === art);
-  if (ex) ex.qty += qty;
-  else layout.boxes[boxIdx].items.push({ article: artData.article, barcode: artData.barcode, qty, volumePerUnit: artData.volume });
-  renderLayout();
-}
 
 // ========== СОХРАНЕНИЕ / ЗАГРУЗКА / ОТГРУЗКА ==========
 async function saveCurrentLayout() {
@@ -1040,6 +1156,12 @@ function showMsg(id, msg, type) { document.getElementById(id).innerHTML = '<div 
 function escapeHtml(text) { const d = document.createElement('div'); d.textContent = String(text == null ? '' : text); return d.innerHTML; }
 
 if (apiUrl) loadData().catch(err => console.warn('Initial load failed:', err.message));
+
+document.addEventListener('click', function(e) {
+  if (!e.target.closest('.autocomplete-wrap')) {
+    document.querySelectorAll('.autocomplete-list').forEach(l => l.classList.remove('open'));
+  }
+});
 </script>
 
 </body>
